@@ -125,6 +125,7 @@ class AudioRenderer(
     numberOfFrames: Int
   ): Map<String, Any>? {
     // WebRTC AudioTrackSink always delivers 16-bit signed int16 PCM.
+
     if (bitsPerSample != 16) {
       logDroppedFrame("Unsupported bitsPerSample: $bitsPerSample (expected 16)")
       return null

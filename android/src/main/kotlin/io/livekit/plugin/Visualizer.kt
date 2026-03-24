@@ -18,11 +18,13 @@ package io.livekit.plugin
 
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import org.webrtc.AudioTrack
 import org.webrtc.AudioTrackSink
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.*
 
 class Visualizer(
@@ -35,21 +37,27 @@ class Visualizer(
 ) : EventChannel.StreamHandler, AudioTrackSink {
     private var eventChannel: EventChannel? = null
     private var eventSink: EventChannel.EventSink? = null
-    private var ffiAudioAnalyzer = FFTAudioAnalyzer()
+//    private var ffiAudioAnalyzer = FFTAudioAnalyzer()
     private var audioTrack: LKAudioTrack? = audioTrack
     private var amplitudes: FloatArray = FloatArray(0)
     private var bands: FloatArray
-    private var loPass: Int = 0
-    private var hiPass: Int = 80
     private var yes = FloatArray(2)
     private var no = FloatArray(2)
+    private var loPass: Int = 0
+    private var hiPass: Int = 80
+
+    private var droppedFrameCount = 0L
+
 
     private var audioFormat = AudioFormat(16, 48000, 1)
+
+    var lipSyncEstimatorStream = LipSyncEstimatorStream();
 
     fun stop() {
         audioTrack?.removeSink(this)
         eventChannel?.setStreamHandler(null)
-        ffiAudioAnalyzer.release()
+//        ffiAudioAnalyzer.release()
+
     }
 
     fun FloatArray.isAllEqual(tolerance: Float = 0.0001f): Boolean {
@@ -57,14 +65,30 @@ class Visualizer(
 
         val first = this[0]
 
-     
+        // 如果有容差，遍历比较；如果没有容差，直接用 distinct
         if (tolerance > 0f) {
             return this.all { value ->
                 kotlin.math.abs(value - first) <= tolerance
             }
         } else {
+            // 严格相等 (不推荐用于 FFT 结果，除非是整数化后的)
             return this.distinct().size == 1
         }
+    }
+
+
+    private fun convertToMono(stereoData: FloatArray, channels: Int): FloatArray {
+        val monoSize = stereoData.size / channels
+        val monoData = FloatArray(monoSize)
+        for (i in 0 until monoSize) {
+            // 简单取左声道，或者取所有声道的平均值
+            var sum = 0f
+            for (c in 0 until channels) {
+                sum += stereoData[i * channels + c]
+            }
+            monoData[i] = sum / channels
+        }
+        return monoData
     }
 
     override fun onData(
@@ -76,48 +100,103 @@ class Visualizer(
         absoluteCaptureTimestampMs: Long
     ) {
 
-        if (audioFormat.sampleRate != sampleRate || audioFormat.bitsPerSample != bitsPerSample || audioFormat.numberOfChannels != numberOfChannels) {
-            audioFormat = AudioFormat(bitsPerSample, sampleRate, numberOfChannels)
-            ffiAudioAnalyzer.configure(audioFormat)
+        // 1. 确保 ByteOrder 是小端序（WebRTC 标准）
+        audioData.order(ByteOrder.LITTLE_ENDIAN)
+
+        // 2. 创建一个 ShortBuffer 来读取 16-bit PCM
+        val shortBuffer = audioData.asShortBuffer()
+        val totalSamples = shortBuffer.remaining()
+
+        // 3. 初始化 FloatArray
+        val floatArray = FloatArray(totalSamples)
+
+        // 4. 转换并归一化 (将 -32768..32767 映射到 -1.0..1.0)
+        for (i in 0 until totalSamples) {
+            floatArray[i] = shortBuffer.get(i) / 32768.0f
         }
 
-        ffiAudioAnalyzer.queueInput(audioData)
-        val fft: FloatArray = ffiAudioAnalyzer.fft ?: return
-
-        val averages = FloatArray(barCount)
-
-        val sliced = fft.slice(loPass until hiPass)
-        amplitudes = calculateAmplitudeBarsFromFFT(sliced, averages, barCount)
-
-        if(bands.size != amplitudes.size) {
-            bands = amplitudes;
-        }
-
-        if(this.isCentered) {
-            amplitudes = centerBands(amplitudes)
-        }
-
-        if(this.smoothTransition) {
-            bands = bands.mapIndexed { index, value ->
-                smoothTransition(value, amplitudes[index], 0.3f)
-            }.toFloatArray()
+        // 5. 如果是多声道且你的 estimate 函数只需要单声道 (pcmMono)
+        val monoData = if (numberOfChannels > 1) {
+            convertToMono(floatArray, numberOfChannels)
         } else {
-            bands = amplitudes
+            floatArray
         }
-
-        if (bands.isAllEqual(0.001f)){
-            ffiAudioAnalyzer
-            no.set(0,1.0f);
-            handler.post {
-                eventSink?.success(no)
-            }
-        }else{
-            yes.set(0,2.0f);
-            handler.post {
-                eventSink?.success(yes)
-            }
+        val (openY, mouthForm) = lipSyncEstimatorStream.estimate(monoData);
+        yes.set(0, openY);
+        yes.set(1, mouthForm);
+        handler.post {
+            eventSink?.success(yes)
         }
     }
+
+    /**
+     * Extracts int16 PCM bytes from an int16 source buffer.
+     *
+     * Fast path when channel counts match (direct copy).
+     * Otherwise keeps only the first [outChannels] channels, interleaved.
+     */
+    private fun extractAsInt16Bytes(
+        buffer: ByteBuffer,
+        srcChannels: Int,
+        outChannels: Int,
+        numberOfFrames: Int
+    ): ByteArray {
+        // Fast path: matching channel count — bulk copy.
+        if (srcChannels == outChannels) {
+            val totalBytes = numberOfFrames * outChannels * 2
+            val out = ByteArray(totalBytes)
+            buffer.get(out, 0, totalBytes.coerceAtMost(buffer.remaining()))
+            return out
+        }
+
+        // Channel reduction: keep first outChannels.
+        val out = ByteArray(numberOfFrames * outChannels * 2)
+        val outBuf = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
+
+        for (frame in 0 until numberOfFrames) {
+            val srcOffset = frame * srcChannels * 2
+            for (ch in 0 until outChannels) {
+                val byteIndex = srcOffset + ch * 2
+                if (byteIndex + 1 < buffer.capacity()) {
+                    buffer.position(byteIndex)
+                    outBuf.putShort((frame * outChannels + ch) * 2, buffer.short)
+                }
+            }
+        }
+
+        return out
+    }
+
+    /**
+     * Converts int16 PCM source to float32 bytes.
+     *
+     * Each int16 sample is scaled to the [-1.0, 1.0] range.
+     * Only the first [outChannels] channels are kept.
+     */
+    private fun extractAsFloat32Bytes(
+        buffer: ByteBuffer,
+        srcChannels: Int,
+        outChannels: Int,
+        numberOfFrames: Int
+    ): ByteArray {
+        val out = ByteArray(numberOfFrames * outChannels * 4)
+        val outBuf = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
+
+        for (frame in 0 until numberOfFrames) {
+            val srcOffset = frame * srcChannels * 2
+            for (ch in 0 until outChannels) {
+                val byteIndex = srcOffset + ch * 2
+                if (byteIndex + 1 < buffer.capacity()) {
+                    buffer.position(byteIndex)
+                    val sampleFloat = buffer.short.toFloat() / Short.MAX_VALUE
+                    outBuf.putFloat((frame * outChannels + ch) * 4, sampleFloat)
+                }
+            }
+        }
+
+        return out
+    }
+
 
     private val handler: Handler by lazy {
         Handler(Looper.getMainLooper())
@@ -135,7 +214,7 @@ class Visualizer(
         eventChannel = EventChannel(binaryMessenger, "io.livekit.audio.visualizer/eventChannel-" + audioTrack.id() + "-" + visualizerId)
         eventChannel?.setStreamHandler(this)
         bands = FloatArray(barCount)
-        ffiAudioAnalyzer.configure(audioFormat)
+//        ffiAudioAnalyzer.configure(audioFormat)
         audioTrack.addSink(this)
     }
 }

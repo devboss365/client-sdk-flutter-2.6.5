@@ -46,6 +46,7 @@ class LiveKitPlugin : FlutterPlugin, MethodCallHandler {
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "livekit_client")
     channel.setMethodCallHandler(this)
     binaryMessenger = flutterPluginBinding.binaryMessenger
+
   }
 
   @SuppressLint("SuspiciousIndentation")
@@ -109,6 +110,8 @@ class LiveKitPlugin : FlutterPlugin, MethodCallHandler {
    * Get or create AudioProcessors for a given trackId
    */
   private fun getAudioProcessors(trackId: String): AudioProcessors? {
+    System.out.println("convertAudioData3 ❌");
+
     // Return existing if found
     audioProcessors[trackId]?.let { return it }
 
@@ -122,6 +125,7 @@ class LiveKitPlugin : FlutterPlugin, MethodCallHandler {
       val remoteTrack = flutterWebRTCPlugin.getRemoteTrack(trackId)
       if (remoteTrack != null) {
         audioTrack = LKRemoteAudioTrack(remoteTrack as AudioTrack)
+
       }
     }
 

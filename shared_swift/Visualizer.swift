@@ -56,8 +56,10 @@ public class Visualizer: NSObject, RTCAudioRenderer, FlutterStreamHandler {
     private var eventSink: FlutterEventSink?
 
     private var channel: FlutterEventChannel?
+    private let _lipSyncEstimator = LipSyncEstimatorStream(sampleRate: 48000, fftSize: 2048)
 
-    public func onListen(withArguments _: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+
+public func onListen(withArguments _: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         eventSink = events
         return nil
     }
@@ -108,35 +110,42 @@ public class Visualizer: NSObject, RTCAudioRenderer, FlutterStreamHandler {
         stop()
     }
 
-    public func render(pcmBuffer: AVAudioPCMBuffer) {
-        let newBands = _processor.process(pcmBuffer: pcmBuffer)
-        guard var newBands else { return }
+public func render(pcmBuffer: AVAudioPCMBuffer) {
+        let frameCount = Int(pcmBuffer.frameLength)
+        guard frameCount > 0 else { return }
 
-        // If centering is enabled, rearrange the normalized bands
-        if isCentered {
-            newBands.sort(by: >)
-            newBands = centerBands(newBands)
-        }
+          var pcmArray: [Float] = []
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-
-            bands = zip(bands, newBands).map { old, new in
-                if self.smoothTransition {
-                    return self._smoothTransition(from: old, to: new, factor: self.smoothingFactor)
-                }
-                return new
+            // 1. 尝试读取 Float32 数据 (最理想情况)
+           if let floatData = pcmBuffer.floatChannelData?[0] {
+                    pcmArray = Array(UnsafeBufferPointer(start: floatData, count: frameCount))
             }
-                
-            if(bands.isAllEqual()){
-                eventSink?([1.0])
-            }else{
-                eventSink?([2.0])
+            // 2. 尝试读取 Int16 数据并手动归一化 (WebRTC 常见情况)
+            else if let int16Data = pcmBuffer.int16ChannelData?[0] {
+                    let int16Buffer = UnsafeBufferPointer(start: int16Data, count: frameCount)
+                    // 将 Int16 (-32768 ~ 32767) 转换为 Float (-1.0 ~ 1.0)
+                    pcmArray = int16Buffer.map { Float($0) / 32768.0 }
             }
-            
-           //eventSink?(bands)
+
+            // 3. 只有拿到数据才进行算法处理
+            if !pcmArray.isEmpty {
+            let lipSyncResult = _lipSyncEstimator.estimate(pcmMono: pcmArray)
+
+            // 调试打印
+//            print("张嘴度: \(lipSyncResult.openY), 嘴型: \(lipSyncResult.mouthForm)")
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // 发送给 Flutter
+                self.eventSink?([lipSyncResult.openY, lipSyncResult.mouthForm])
+            }
+        } else {
+            // 如果走到这里，说明 pcmBuffer 既不是 Float 也不含有效 Int16
+            print("Buffer format Error: \(pcmBuffer.format.description) 😅")
         }
     }
+
+
 
     // MARK: - Private
 

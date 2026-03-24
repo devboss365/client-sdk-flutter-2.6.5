@@ -23,6 +23,7 @@ class LKRemoteAudioTrack(audioTrack: AudioTrack) : LKAudioTrack {
     private var audioTrack: AudioTrack? = audioTrack
 
     override fun addSink(sink: AudioTrackSink?) {
+
         audioTrack?.addSink(sink)
     }
 
