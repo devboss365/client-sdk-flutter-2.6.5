@@ -65,6 +65,8 @@ public class LiveKitPlugin: NSObject, FlutterPlugin {
 
         let channel = FlutterMethodChannel(name: "livekit_client", binaryMessenger: messenger)
         let instance = LiveKitPlugin()
+        let webrtc = FlutterWebRTCPlugin.sharedSingleton()
+        webrtc?.customVisualizer = CustomVisualizer(binaryMessenger:messenger);
         instance.binaryMessenger = messenger
         registrar.addMethodCallDelegate(instance, channel: channel)
 

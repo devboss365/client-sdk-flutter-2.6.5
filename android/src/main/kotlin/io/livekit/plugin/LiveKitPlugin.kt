@@ -35,6 +35,7 @@ class LiveKitPlugin : FlutterPlugin, MethodCallHandler {
   private var audioProcessors = mutableMapOf<String, AudioProcessors>()
   private var flutterWebRTCPlugin = FlutterWebRTCPlugin.sharedSingleton
   private var binaryMessenger: BinaryMessenger? = null
+  private var customVisualizer: CustomVisualizer? = null
 
   /// The MethodChannel that will the communication between Flutter and native Android
   ///
@@ -46,7 +47,8 @@ class LiveKitPlugin : FlutterPlugin, MethodCallHandler {
     channel = MethodChannel(flutterPluginBinding.binaryMessenger, "livekit_client")
     channel.setMethodCallHandler(this)
     binaryMessenger = flutterPluginBinding.binaryMessenger
-
+    customVisualizer=CustomVisualizer(binaryMessenger!!)
+    flutterWebRTCPlugin.setCustomVisualizer(customVisualizer)
   }
 
   @SuppressLint("SuspiciousIndentation")
@@ -110,7 +112,6 @@ class LiveKitPlugin : FlutterPlugin, MethodCallHandler {
    * Get or create AudioProcessors for a given trackId
    */
   private fun getAudioProcessors(trackId: String): AudioProcessors? {
-    System.out.println("convertAudioData3 ❌");
 
     // Return existing if found
     audioProcessors[trackId]?.let { return it }
